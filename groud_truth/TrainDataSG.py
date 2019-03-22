@@ -1,38 +1,13 @@
-import logging
 import numpy as np
-import pandas as pd
-from scipy.signal import savgol_filter
-import datetime
+import os
 
 
-class TrainDataSG:
-    my_logger = logging.getLogger(__qualname__)
-
-    def __init__(self,
-                 file,
-                 year='2018',
-                 start_day='0101',
-                 end_day='1231',
-                 sg_window=17,
-                 sg_polyorder=1,
-                 quantity=2000
-                 ):
-        self.year = year
-        self.start_day = year + start_day
-        self.end_day = year + end_day
-        self.sg_window = sg_window
-        self.sg_polyorder = sg_polyorder
+class TrainDataFlat:
+    def __init__(self, file):
         self.file = file
-        self.quantity = quantity
-        self.feature, self.label = self._load_npz()
-        # create new time and to order
-        nidx = pd.date_range(self.start_day, self.end_day,
-                             freq="5D")  # time index
-        new_time_tmp = nidx.to_pydatetime()
-        new_time = [tmp.strftime("%Y%m%d") for tmp in new_time_tmp]  # time str
-        self.new_time_order = list(map(self._ymd_to_jd, new_time))
+        self.feature, self.label = self.load_npz()
 
-    def _load_npz(self):
+    def load_npz(self):
         try:
             data = np.load(self.file)
             feature = data['features'].tolist()
@@ -42,190 +17,45 @@ class TrainDataSG:
             print('Load {} error: {}'.format(self.file, e))
             return None
 
-    def _ymd_to_jd(self, str_time):
-        fmt = "%Y%m%d"
-        dt = datetime.datetime.strptime(str_time, fmt)
-        tt = dt.timetuple()
-        return tt.tm_yday
-
-    def _interpolate_and_sg(self, original_data, original_time):
-        """
-        data_series = [v1, v2, v3, ...]
-        original_time = [t1, t2, t3, ...]
-        SG smoothing
-        """
-        original_time_order = list(
-            map(self._ymd_to_jd, original_time))  # YMD to order
-
-        # interp
-        valid_idx = np.where(~np.isnan(original_data))
-        original_data = original_data[valid_idx]
-        original_time_order = np.array(original_time_order)[valid_idx]
-
-        inter_data = np.interp(self.new_time_order,
-                               original_time_order, original_data)
-
-        # using SG to filter the data, window_length = 17, polyorder = 1
-        result_sg = savgol_filter(
-            inter_data,
-            window_length=self.sg_window,
-            polyorder=self.sg_polyorder,
-            mode='nearest'
-        )
-
-        return list(result_sg)
-
-    def single_run(self, iter, data_d):
-        """
-
-        :param iter: None for production
-        :param data_d: full feature dictionary
-        :return:w
-        """
-        precess_dict = dict()
-        bad_end = 0
-        bad_list = []
-        # optical = ['Landsat_8', 'Sentinel_2']
-        # TODO: get source list out of code
-        source_list = ['Landsat_8', 'Sentinel_1', 'DEM']
-        # for source in data_d.keys():
-        for source in source_list:
-            if source not in list(data_d.keys()):
-                continue
-            print("* * * * start SG mask * * * *")
-            print('process source {} \n'.format(source))
-            source_data = data_d[source]
-            band_list = [b for b in source_data.keys()]
-            band_list.remove('time')
-            print(band_list)
-            for band in band_list:
-                print('mask band: {} in source: {}'.format(band, source))
-                # TODO: transpose array,YES!
-                band_data = np.array(source_data[band]).T
-                print(band_data.shape)
-                # TODO: parallel run
-                if iter is None:
-                    tmp_data = list(band_data)
-                else:
-                    tmp_data = list(band_data)[
-                        (iter * self.quantity): (iter + 1) * self.quantity]
-                n = -1
-                # TODO: consider to delete the all time NAN s1 data
-                for data_series in tmp_data:
-                    n += 1
-                    if "D" not in source:
-                        if np.isnan(data_series).sum() == len(data_series):
-                            bad_end += 1
-                            bad_list.append(n)
-                            continue
-                    else:
-                        # print('DEM, pass ...')
-                        continue
-        bad_list = list(set(bad_list))
-        if len(bad_list) == self.quantity:
-            self.my_logger.error("Invalid value in this = = CHUNK = =")
-            return None, bad_list
-        else:
-            print('Invalid data index in chunk {}: '.format(iter + 1))
-            print(bad_list)
-
-            for source in source_list:
-                if source not in list(data_d.keys()):
-                    continue
-                print("= = = = start SG = = = =")
-                print('process source {} \n'.format(source))
-                source_data = data_d[source]
-                time_list = source_data['time']
-                band_list = [b for b in source_data.keys()]
-                band_list.remove('time')
-                print(band_list)
-                for band in band_list:
-                    print('process band: {} in source: {}'.format(band, source))
-                    band_data = np.array(source_data[band]).T
-                    print(band_data.shape)
-                    # assert band_data.shape[0] == length
-                    new_key = source + '-' + band
-                    # TODO: parallel run
-                    if iter is None:
-                        tmp_data = list(band_data)
-                    else:
-                        tmp_data = list(band_data)[
-                            (iter * self.quantity): (iter + 1) * self.quantity]
-                    n = -1
-                    # TODO: consider to delete the all time NAN s1 data
-                    for data_series in tmp_data:
-                        n += 1
-                        if 'D' in source:
-                            if n in bad_list:
-                                continue
-                            else:
-                                # print('DEM: ', data_series)
-                                res = np.full(
-                                    (1, len(self.new_time_order)), data_series)
-                                res = res.tolist()[0]
-                                precess_dict.setdefault(
-                                    new_key, []).append(res)
-                        else:
-                            if n in bad_list:
-                                continue
-                            else:
-                                res = self._interpolate_and_sg(
-                                    data_series, time_list)
-                                precess_dict.setdefault(
-                                    new_key, []).append(res)
-
-                    print('finish band: {} in source: {} \n'.format(band, source))
-                print('finish source {}'.format(source))
-            return precess_dict, bad_list
-
-    def batch_run(self):
-        """
-
-        :param quantity: chunk size
-        :return: 2-D array
-        [
-            [p1-t1, p1-t2, ...],
-            [p2-t1, p2-t2, ...],
-            ...
-        ]
-        """
-
-        length = len(self.label)
-        iter_total = int(length / self.quantity) + 1
-        for n in range(iter_total):
-            iters = n + 1
-            print('PROCESS {}/{} slide of data \n'.format(iters, iter_total))
-            print('CHUNK SIZE {}'.format(self.quantity))
-            tmp_lab = list(self.label)[
-                (n * self.quantity): (n + 1) * self.quantity]
-            precess_dict, invalid_list = self.single_run(n, self.feature)
-            print(invalid_list)
-            invalid_list = list(set(invalid_list))
-            print(len(invalid_list), len(tmp_lab))
-            if len(invalid_list) >= len(tmp_lab):
-                continue
-
+    def data_flat(self):
+        res = []
+        keys = list(self.feature.keys())
+        keys.sort()
+        print(keys)
+        for key in keys:
+            data = self.feature[key]
+            if not list(res):
+                res = np.array(data)
             else:
-                valid_list = [k for k in range(
-                    len(tmp_lab)) if k not in invalid_list]
-                tmp_lab = list(np.array(tmp_lab)[valid_list])
-                print('length of label ', len(tmp_lab))
-                save_file = (
-                        self.file.split('.')[0]
-                        + "_"
-                        + self.start_day[-4:]
-                        + "_"
-                        + self.end_day[-4:]
-                        + "_"
-                        + str(self.sg_window)
-                        + "_"
-                        + str(self.sg_polyorder)
-                        + "_"
-                        + str(self.quantity)  # noqa :F405
-                        + "_"
-                        + str(n + 1)
-                        + ".npz"
-                )
-                np.savez(save_file, features=precess_dict, labels=tmp_lab)
-            print('{}/{} DONE! \n'.format(iters, iter_total))
-        print('HERO: ALL DONE')
+                res = np.concatenate((res, data), axis=1)
+            print("     -> ", res.shape)
+        return res
+
+
+def batch_run(file_list):
+    sample_name = os.path.join(
+        os.path.dirname(file_list[0]),
+        os.path.basename(file_list[0]).split('extract')[0] + 'TRAIN.npz'
+    )
+    print(sample_name)
+    final_feat = []
+    final_lab = []
+    print('process data flatten')
+    for file in file_list:
+        print('file in operating {}'.format(file))
+        TF = TrainDataFlat(file)
+        _, lab = TF.load_npz()
+        result = TF.data_flat()
+        if not final_lab:
+            final_feat = result
+            final_lab = lab
+        else:
+            final_feat = np.concatenate((final_feat, result), axis=0)
+            final_lab = final_lab + lab
+            # final_lab = np.concatenate((final_lab, lab), axis=1)
+        print("file feature     -> ", np.array(final_feat).shape)
+        print("file lab         -> ", len(final_lab))
+        print('\n')
+    np.savez(sample_name, features=final_feat, labels=final_lab)
+    print("finish data prepare")
+    return sample_name

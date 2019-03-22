@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import numpy as np
 import glob
@@ -9,7 +8,7 @@ from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
 from functools import reduce
-from baikal.general.Vividict import Vividict
+# from baikal.general.Vividict import Vividict
 from baikal.general.common import *
 from baikal.general.calc_mask_by_shape import (
     calc_mask_by_shape,
@@ -158,7 +157,7 @@ class TrainDataExtractorV2:
             shapef = ogr.Open(shape_path)
             lyr = shapef.GetLayer(0)
             shp_spatial_ref = lyr.GetSpatialRef()
-        except Exception as e:
+        except Exception:
             self.my_logger.error("open shape file error: %s", shape_path)
             return False
 
@@ -167,7 +166,7 @@ class TrainDataExtractorV2:
             ds = gdal.Open(ras_path)
             ras_proj = ds.GetProjection()
             ras_spatial_ref = osr.SpatialReference(wkt=ras_proj)
-        except Exception as e:
+        except Exception:
             self.my_logger.error("open raster file error: %s", ras_path)
             return False
 
@@ -244,14 +243,14 @@ class TrainDataExtractorV2:
             mask: np.ndarray,
             qa_path: str,
             *,
-            nodata_value: float=np.nan,
+            nodata_value: float = np.nan,
     ) -> (np.ndarray, np.ndarray):
         cloudmask = gdal.Open(qa_path)
         cloudmask_raster = cloudmask.GetRasterBand(1).ReadAsArray()
         print("cloud mask shape {}".format(cloudmask_raster.shape))
         # get cloud mask from qa file
         assert cloudmask_raster.shape == data.shape
-        true_data = np.array([66, 130, 322, 386, 834, 898, 1346])
+        true_data = np.array([66, 130, 322, 386, 834, 898, 1346, 1])
         print("True data value: {}".format(true_data))
         index = np.nonzero(np.isin(cloudmask_raster, true_data))
         print('index: ', index)
@@ -295,7 +294,10 @@ class TrainDataExtractorV2:
     ):
         dem_mask = np.isin(data, invalid_data, invert=True)
         if not list(np.nonzero(dem_mask)[0]):
-            raise Exception("no valid value in DEM")
+            self.my_logger.error(
+                "no valid value in DEM + SAR, steping to next path")
+            return False
+            # raise Exception("no valid value in DEM + SAR")
             # TODO if DEM/S1 is all in valid, no need to do other mask
         return dem_mask
 
@@ -306,11 +308,11 @@ class TrainDataExtractorV2:
             invalid_range: list,
     ):
         """
-        get mask from QA file, band data,
-        :param qa_path:
-        :param data:
-        :param nodata_value:
-        :return:
+        get mask from QA file, band data
+        :param qa_path: str
+        :param data: ndarray
+        :param nodata_value: list
+        :return: ndarray
         """
         cloudmask = gdal.Open(qa_path)
         cloudmask_raster = cloudmask.GetRasterBand(1).ReadAsArray()
@@ -327,7 +329,8 @@ class TrainDataExtractorV2:
             # TODO if QA is all in valid, no need to do other mask
             return False
         # get invalid data mask from band data tif, valid = (0, 10000]
-        mask = np.logical_and(data > invalid_range[0], data <= invalid_range[1])
+        mask = np.logical_and(
+            data > invalid_range[0], data <= invalid_range[1])
         w_mask = np.ma.array(data, mask=mask)
         qa_w_mask = w_mask.mask * qa_mask
         if not list(np.nonzero(qa_w_mask)[0]):
@@ -400,7 +403,7 @@ class TrainDataExtractorV2:
             x_size = ds.RasterXSize
             y_size = ds.RasterYSize
             img_shape = [x_size, y_size]
-        except Exception as e:
+        except Exception:
             self.my_logger.error(
                 "open raster file error: {}".format(first_raster_name))
             return None, None, None
@@ -424,47 +427,46 @@ class TrainDataExtractorV2:
             reprj_label_path = self.shp_label_path.replace(
                 ".shp", "_reprj_{}.shp".format(epsg_raster))
 
-            if os.path.exists(reprj_label_path):
-                self.my_logger.info("reprojected shape file exist!")
-            else:
-                reprj_cmd_str = "ogr2ogr -t_srs EPSG:{} -s_srs EPSG:{} {} {}".format(
-                    epsg_raster, epsg_shape, reprj_label_path, self.shp_label_path)
-                self.my_logger.info("Shape reprojection command: {}".format(
-                    reprj_cmd_str))
-                process_status = subprocess.run(
-                    [sub_str.replace(",", " ")
-                     for sub_str in reprj_cmd_str.split()]
-                )
-                # check process status
-                assert process_status.returncode == 0, "label shape reprojection failed!"
+            reprj_cmd_str = "ogr2ogr -t_srs EPSG:{} -s_srs EPSG:{} {} {}".format(
+                epsg_raster, epsg_shape, reprj_label_path, self.shp_label_path)
+            self.my_logger.info("Shape reprojection command: {}".format(
+                reprj_cmd_str))
+            process_status = subprocess.run(
+                [sub_str.replace(",", " ")
+                    for sub_str in reprj_cmd_str.split()]
+            )
+            # check process status
+            assert process_status.returncode == 0, "label shape reprojection failed!"
 
             mask_label_path = reprj_label_path
 
         # generate label mask
         self.my_logger.info("Generating label mask ...")
-        mask, num_label, list_label = calc_mask_by_shape(
+        label_mask, num_label, list_label = calc_mask_by_shape(
             mask_label_path,
             geo_trans,
             img_shape,
             specified_field=self.field_name,
             condition=None,
+            # error error error
             mask_value=-1,
             flag_dlist=True,
             field_strict=True,
         )
-        if mask is None:
+        if label_mask is None:
             self.my_logger.error("calculating label mask error")
             return None, None, None
-        print("There are {} polygons".format(num_label), np.max(mask))
+        print("There are {} polygons and max label is {}".format(
+            num_label, np.max(label_mask)))
 
         # get raster data
         self.my_logger.info("Getting raster data...")
         n_file = len(self.read_order_list)
         fn = 0
 
-        qa_source = ['Landsat_8', 'Sentinel_2']
         final_feature = dict()
-        for key in self.ori_dict.keys():
+        for key in self.img_dict.keys():
+            # keys: DEM, Optical, Sentinel_1
             final_feature[key] = dict()
         # loop read order list, read all raster datas
         train_lab = []
@@ -473,10 +475,10 @@ class TrainDataExtractorV2:
         for ro in self.read_order_list:
             fn += 1
             print("{}/{} raster files:".format(fn, n_file))
-            source = ro[0]  # "Sentinel_1", "Landsat_8", "DEM"
+            source = ro[0]  # "Optical", "Sentinel_1", "DEM"
             ttime = ro[1]  # "20180111", "20180120", '20180120-1'
             print('data source => ', source)
-            final_feature[source].setdefault('time', []).append(ttime[:8])
+            # final_feature[source].setdefault('time', []).append(ttime[:8])
             b = 0
             QA_mask = []
             S1_mask = []
@@ -484,7 +486,8 @@ class TrainDataExtractorV2:
             bad = 0
             for tif in self.img_dict[source][ttime]:
                 bn = b + 1  # band_id, starts from 1
-                print("mask {}/{} band:".format(bn, len(self.img_dict[source][ttime])))
+                print("mask {}/{} band:\n {}".
+                      format(bn, len(self.img_dict[source][ttime]), tif))
 
                 # read raster data band bn
                 ras_data = self.get_ori_data(tif)
@@ -493,97 +496,120 @@ class TrainDataExtractorV2:
                     return None, None, None
 
                 RAS_DATA.append(ras_data)
-                # get mask from DEM
-                if 'D' in source:
-                    if 'ASPECT' or 'SLOPE' in tif:
-                        dem_mask.append(self.create_DEM_s1_mask(ras_data, [-9999.]))
-                    else:
-                        dem_mask.append(self.create_DEM_s1_mask(ras_data, [-32768.]))
+                # get mask from source
 
-                if source in qa_source:
+                if source == "DEM":
+                    tif_name = os.path.basename(tif)
+                    if 'ASPECT' in tif_name or 'SLOPE' in tif_name:
+                        dem_mask.append(
+                            self.create_DEM_s1_mask(ras_data, [-9999.]))
+                    else:
+                        dem_mask.append(
+                            self.create_DEM_s1_mask(ras_data, [-32768.]))
+
+                elif source == "Optical":
                     pixel_qa_list = glob.glob(join(os.path.dirname(
-                        self.img_dict[source][ttime][0]), '*_pixel_qa.tif'))
+                        self.img_dict[source][ttime][0]), '*pixel_qa.tif'))
                     assert(len(pixel_qa_list) ==
                            1), "pixel qa file number error!"
                     qa_path = pixel_qa_list[0]
                     print('QA path {}'.format(qa_path))
-                    qa_mask = self.create_QA_mask(qa_path, ras_data, [0., 10000.])
+                    # optical data valid range: [0, 10000)
+                    qa_mask = self.create_QA_mask(
+                        qa_path, ras_data, [0., 10000.])
                     if np.nonzero(qa_mask)[0].shape[0] == 0:
                         bad = 1
                         break
                     QA_mask.append(qa_mask)
 
                 else:
-                    S1_mask.append(self.create_DEM_s1_mask(ras_data, [10000.]))
+                    tmp_mask = self.create_DEM_s1_mask(ras_data, [10000.])
+                    if isinstance(tmp_mask, np.ndarray):
+                        S1_mask.append(tmp_mask)
+                    else:
+                        bad = 1
+                        break
                 b += 1
             print('finish mask => ', source)
             if bad == 1:
                 self.my_logger.error(
-                    "get valid data from {} in {}, stepping to next".format(source, ttime))
-                final_feature[source]['time'].remove(ttime[:8])
+                    "get valid data from {} in {}, stepping to next".format(
+                        source, ttime))
+                # final_feature[source]['time'].remove(ttime[:8])
                 continue
+            else:
+                final_feature[source].setdefault('time', []).append(ttime[:8])
 
             assert len(dem_mask) == 3
             DEM_mask = reduce(lambda x, y: x*y, dem_mask)
 
-            mask = DEM_mask * mask
+            RAS_DATA = np.array(RAS_DATA)
+            print("original image data: ", RAS_DATA.shape)
+
+            if source == "Optical":
+                print('mask Optical ...')
+                assert len(QA_mask) == RAS_DATA.shape[0]
+                final_QA_mask = reduce(lambda x, y: x * y, QA_mask)
+                try:
+                    QA_DEM_mask = final_QA_mask * DEM_mask
+                except Exception:
+                    self.my_logger.warning(
+                        '{}-{} data shape unmatched!'.format(source, ttime))
+                    break
+                MASK = QA_DEM_mask
+
+            elif source == "Sentinel_1":
+                print('mask Sentinel-1 ...')
+                assert len(S1_mask) == len(RAS_DATA)
+                final_S1_mask = reduce(lambda x, y: x * y, S1_mask)
+                S1_DEM_mask = final_S1_mask * DEM_mask
+                MASK = S1_DEM_mask
+
+            else:
+                print('mask DEM ...')
+                MASK = DEM_mask
+                # index = np.nonzero(DEM_mask)
+
+            # get train label from DEM mask
+            mask = DEM_mask * label_mask
             mask_idx = np.where(mask > 0)
             train_lab = mask[mask_idx].flatten()
-            bn = 0
-            print(len(RAS_DATA))
-            for data in RAS_DATA:
-                bn += 1
-                valid_data = np.full(data.shape, np.nan)
-                if source in qa_source:
-                    print('mask Landsat-8 ...')
+            self.my_logger.info(
+                'num of sample points in this tile: {}'.format(len(train_lab)))
 
-                    assert len(QA_mask) == len(RAS_DATA)
-                    final_QA_mask = reduce(lambda x, y: x * y, QA_mask)
-                    try:
-                        QA_DEM_mask = final_QA_mask * DEM_mask
-                    except Exception:
-                        self.my_logger.warning('{}-{} data shape unmatched!'.format(source, ttime))
-                        break
-                    index = np.nonzero(QA_DEM_mask)
-                    print('index: ', index)
-                elif 'Se' in source:
-                    print('mask Sentinel-1 ...')
-                    assert len(S1_mask) == len(RAS_DATA)
-                    final_S1_mask = reduce(lambda x, y: x * y, S1_mask)
-                    S1_DEM_mask = final_S1_mask * DEM_mask
-                    index = np.nonzero(S1_DEM_mask)
-                    print('index: ', index)
-                else:
-                    print('mask DEM ...')
-                    index = np.nonzero(DEM_mask)
+            index = np.nonzero(MASK)
+            valid_mask = np.full(RAS_DATA.shape[1:], np.nan)
 
-                valid_data[index] = 1
-                valid_data = valid_data * data
+            valid_mask[index] = 1
 
-                # process masked data by sample mask
-                train_data = valid_data[mask_idx]
+            # get data from qa mask
+            valid_data = valid_mask * RAS_DATA
 
-                if train_data.shape == train_lab.shape:
-                    print("train shape %d" % train_data.shape)
-                else:
-                    raise Exception("get_valid_data(): shape not match! skip")
+            # get data from label mask
+            train_data = valid_data[:, mask_idx[0], mask_idx[1]]
+            train_data = train_data.reshape(RAS_DATA.shape[0], -1)
+            if train_data.shape[1] == train_lab.shape[0]:
+                print("train shape {}".format(train_data.shape))
+            else:
+                self.my_logger.debug("train features and train lab not match")
+                raise Exception("get_valid_data: shape not match! skip")
 
-                train_data = train_data.flatten()
-
-                band_key = 'Band_' + str(bn)
+            for i in range(train_data.shape[0]):
+                k = i + 1
+                band_key = 'Band_' + str(k)
                 self.my_logger.info(
                     "getting data from [{}->{}] [{}], shape:{}".format(
-                        source, band_key, ttime, train_data.shape)
+                        source, band_key, ttime, train_data[i].shape)
                 )
-
                 # append data to 2-D array: (points_num x times)
                 final_feature[source].setdefault(
-                    band_key, []).append(train_data)
+                    band_key, []).append(train_data[i])
                 print(
                     "{source}->{band_key} feature shape: ->".format(
                         source=source, band_key=band_key),
                     np.array(final_feature[source][band_key]).shape
                 )
+
         assert train_lab is not None
         # positive: 1; negative: 0
         if self.isbinarize:

@@ -19,7 +19,10 @@ class TrainDataFlat:
 
     def data_flat(self):
         res = []
-        for key in self.feature.keys():
+        keys = list(self.feature.keys())
+        keys.sort()
+        print(keys)
+        for key in keys:
             data = self.feature[key]
             if not list(res):
                 res = np.array(data)
